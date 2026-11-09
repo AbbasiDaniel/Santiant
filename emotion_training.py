@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Sentiant emotion model: data simulation, 15-minute features and network training.
-Runs on its own and writes emotion_model.h automatically:
+"""Sentiant emotion model: 8 emotions + 4 metrics (stability, intensity, burstiness, wavelength).
+Automatically generates a complete emotion_model.h for the bracelet.
 pip install numpy scipy torch
 python emotion_training.py
 """
@@ -16,14 +16,26 @@ from scipy.special import ndtri
 from torch import nn
 
 SEED = 7
-PEOPLE = 40
+PEOPLE = 24
 DAYS = 6
 HOURS_PER_DAY = 12
 EPOCH_SEC = 5
 WINDOW_SEC = 900
 WINDOW_EPOCHS = WINDOW_SEC // EPOCH_SEC
-EMOTIONS = ("calm", "tense", "upbeat", "subdued")
-EMOTION_SHARE = (0.45, 0.2, 0.2, 0.15)
+
+# ---------- 8 emotions ----------
+EMOTIONS = (
+    "calm",      # 0
+    "tense",     # 1
+    "upbeat",    # 2
+    "subdued",   # 3
+    "happy",     # 4
+    "sad",       # 5
+    "angry",     # 6
+    "tired",     # 7
+)
+EMOTION_SHARE = (0.22, 0.12, 0.12, 0.10, 0.14, 0.10, 0.10, 0.10)
+
 HR, MOTION, PITCH, ENERGY = range(4)
 SIGNALS = ("hr", "motion", "pitch", "energy")
 METRICS = ("stability", "intensity", "burstiness", "wavelength")
@@ -48,15 +60,29 @@ VOICE_INPUTS = list(range(8, 18))
 HEART_SIZE, MOTION_SIZE, VOICE_SIZE = 6, 6, 8
 DEEP_SIZES = (16, 12, 8)
 INPUT_LIMIT = 5.0
-TARGET_ACCURACY = 0.85
-MIN_KEPT_SHARE = 0.2
+TARGET_ACCURACY = 0.80
+MIN_KEPT_SHARE = 0.18
 
+# 8 rows × 9 physiological effect parameters
+# [hr_shift, hr_wobble, hr_period, hr_spikes, motion_gain, pitch_ratio, pitch_jitter, energy_shift, talk_gain]
 EFFECTS = np.array(
     [
-        [2.0, 1.5, 180.0, 2.0, 1.0, 1.00, 0.040, 0.0, 1.0],
-        [16.0, 3.0, 60.0, 20.0, 1.5, 1.09, 0.070, 3.0, 1.1],
-        [10.0, 2.5, 110.0, 6.0, 1.8, 1.07, 0.120, 5.0, 1.6],
-        [-4.0, 0.8, 240.0, 1.0, 0.6, 0.95, 0.025, -4.0, 0.5],
+        # calm
+        [  2.0, 1.5, 180.0,  2.0, 1.00, 1.00, 0.040,  0.0, 1.00],
+        # tense
+        [ 16.0, 3.0,  60.0, 20.0, 1.50, 1.09, 0.070,  3.0, 1.10],
+        # upbeat
+        [ 10.0, 2.5, 110.0,  6.0, 1.80, 1.07, 0.120,  5.0, 1.60],
+        # subdued
+        [ -4.0, 0.8, 240.0,  1.0, 0.60, 0.95, 0.025, -4.0, 0.50],
+        # happy
+        [  6.0, 2.0, 130.0,  4.0, 1.40, 1.12, 0.090,  6.0, 1.80],
+        # sad
+        [ -2.0, 1.2, 220.0,  3.0, 0.70, 0.92, 0.030, -5.0, 0.40],
+        # angry
+        [ 18.0, 3.5,  70.0, 25.0, 2.20, 1.15, 0.100,  8.0, 1.40],
+        # tired
+        [ -6.0, 0.6, 260.0,  1.5, 0.50, 0.90, 0.020, -6.0, 0.30],
     ]
 )
 
@@ -326,7 +352,7 @@ def train(train_set: Dataset, val_set: Dataset, scaler: Scaler) -> FusionNet:
     flag_off = float(-scaler.mean[VOICE_FLAG] / scaler.std[VOICE_FLAG])
     net = FusionNet()
     optimizer = torch.optim.AdamW(net.parameters(), lr=0.002, weight_decay=0.001)
-    schedule = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=300)
+    schedule = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=120)
 
     def loss_of(inputs: torch.Tensor, labels: torch.Tensor, levels: torch.Tensor) -> torch.Tensor:
         logits, predicted = net(inputs)
@@ -334,7 +360,7 @@ def train(train_set: Dataset, val_set: Dataset, scaler: Scaler) -> FusionNet:
         return emotion_loss + 2.0 * nn.functional.mse_loss(predicted, levels)
 
     best, best_state, stale = math.inf, None, 0
-    for _ in range(300):
+    for epoch in range(120):
         net.train()
         for batch in torch.randperm(len(x), generator=shuffle).split(64):
             hide = torch.rand(len(batch), generator=shuffle) < 0.2
@@ -351,6 +377,8 @@ def train(train_set: Dataset, val_set: Dataset, scaler: Scaler) -> FusionNet:
                 stale += 1
             if stale >= 40:
                 break
+        if (epoch + 1) % 50 == 0:
+            print(f"  epoch {epoch+1}, val loss {loss:.4f}")
     net.load_state_dict(best_state)
     net.eval()
     return net
@@ -372,7 +400,7 @@ class Layer:
         rescaled = (total * self.mult + (1 << (self.shift - 1))) >> self.shift
         out = rescaled + self.out_zero
         if self.apply_relu:
-            out = np.maximum(out, self.out_zero)  # ReLU relative to the zero-point
+            out = np.maximum(out, self.out_zero)
         return np.clip(out, self.out_min, 127).astype(np.int64)
 
 
@@ -405,14 +433,7 @@ def quantize_layer(
         mult = max(mult // 2, 1)
         shift += 1
     return Layer(
-        q_weights,
-        q_bias,
-        mult,
-        shift,
-        in_zero,
-        out_zero,
-        out_min,
-        apply_relu=apply_relu,
+        q_weights, q_bias, mult, shift, in_zero, out_zero, out_min, apply_relu=apply_relu
     )
 
 
@@ -462,7 +483,6 @@ class QuantizedNet:
 
 
 def quantize(net: FusionNet, train_set: Dataset, scaler: Scaler) -> QuantizedNet:
-    """Post-training quantization with consistent zero-points and explicit ReLU."""
     z = torch.as_tensor(scaler.inputs(train_set.X))
     flag_off = float(-scaler.mean[VOICE_FLAG] / scaler.std[VOICE_FLAG])
     z = torch.cat((z, hide_voice(z, torch.ones(len(z), dtype=torch.bool), flag_off)))
@@ -481,18 +501,15 @@ def quantize(net: FusionNet, train_set: Dataset, scaler: Scaler) -> QuantizedNet
 
     scale0 = act_scale(states[0])
 
-    # هر سه شاخه با همان scale و zero-point=0 (بعد از ReLU)
     heart = quantize_layer(net.heart, input_scale, 0, scale0, 0, 0, apply_relu=True)
     motion = quantize_layer(net.motion, input_scale, 0, scale0, 0, 0, apply_relu=True)
     voice = quantize_layer(net.voice, input_scale, 0, scale0, 0, 0, apply_relu=True)
 
     deep: List[Layer] = []
     prev_scale = scale0
-    for i, (layer, state) in enumerate(zip(net.deep, states[1:])):
+    for layer, state in zip(net.deep, states[1:]):
         out_scale = act_scale(state)
-        deep.append(
-            quantize_layer(layer, prev_scale, 0, out_scale, 0, 0, apply_relu=True)
-        )
+        deep.append(quantize_layer(layer, prev_scale, 0, out_scale, 0, 0, apply_relu=True))
         prev_scale = out_scale
 
     logit_scale = max(float(np.percentile(np.abs(logits), 99.9)), 1e-3) / 127.0
@@ -502,16 +519,8 @@ def quantize(net: FusionNet, train_set: Dataset, scaler: Scaler) -> QuantizedNet
     intensity = quantize_layer(net.intensity, prev_scale, 0, level_scale, 0, -127, apply_relu=False)
 
     return QuantizedNet(
-        scaler,
-        input_scale,
-        heart,
-        motion,
-        voice,
-        deep,
-        emotion,
-        intensity,
-        logit_scale,
-        level_scale,
+        scaler, input_scale, heart, motion, voice, deep, emotion, intensity,
+        logit_scale, level_scale,
     )
 
 
@@ -543,111 +552,329 @@ def calibrate(model: QuantizedNet, val_set: Dataset) -> None:
     model.min_confidence = best
 
 
+def _fmt_array(arr, fmt_fn):
+    return ", ".join(fmt_fn(x) for x in arr)
+
+
 def print_header_values(model: QuantizedNet) -> None:
-    header_content = f"""// emotion_model.h - Generated automatically by emotion_training.py
-#pragma once
-#include <math.h>
-#include <stdint.h>
+    """Generate a complete, ready-to-use emotion_model.h"""
+    lines = []
+    a = lines.append
 
-#define EMOTION_NUM_FEATURES 18
-#define EMOTION_NUM_CLASSES 4
-#define EMOTION_WINDOW_EPOCHS 180
-#define EMOTION_EPOCH_SEC 5
+    a("// emotion_model.h - Generated automatically by emotion_training.py")
+    a("// 8 emotions + stability / intensity / burstiness / wavelength per 15-min window")
+    a("#pragma once")
+    a("#include <math.h>")
+    a("#include <stdint.h>")
+    a("")
+    a("#define EMOTION_NUM_FEATURES 18")
+    a("#define EMOTION_NUM_CLASSES 8")
+    a("#define EMOTION_WINDOW_EPOCHS 180")
+    a("#define EMOTION_EPOCH_SEC 5")
+    a("")
+    a("enum EmotionStatus : uint8_t {")
+    a("    EMOTION_OK = 0,")
+    a("    EMOTION_LOW_CONFIDENCE = 1,")
+    a("    EMOTION_HIGH_MOTION = 2,")
+    a("    EMOTION_NO_DATA = 3,")
+    a("};")
+    a("")
+    a("static const uint8_t EMOTION_NONE = 255;")
+    a('static const char* const EMOTION_NAMES[EMOTION_NUM_CLASSES] = {')
+    a('    "calm", "tense", "upbeat", "subdued", "happy", "sad", "angry", "tired"')
+    a("};")
+    a("")
+    a("// Final output for every 15-minute window")
+    a("struct EmotionResult {")
+    a("    uint8_t status;           // OK / LOW_CONFIDENCE / HIGH_MOTION / NO_DATA")
+    a("    uint8_t emotion;          // 0..7 or 255")
+    a("    uint8_t confidence_pct;   // 0..100")
+    a("    float   stability;        // HR stability (std)")
+    a("    float   intensity;        // HR intensity (mean - baseline)")
+    a("    float   burstiness;       // HR burstiness (std / |mean|)")
+    a("    float   wavelength;       // HR peak interval (seconds)")
+    a("};")
+    a("")
+    a("// ---------- Scaler ----------")
+    a("static const float kEmotionMean[18] = {")
+    a("    " + _fmt_array(model.scaler.mean, lambda x: f"{x:.9e}f"))
+    a("};")
+    a("static const float kEmotionStd[18] = {")
+    a("    " + _fmt_array(model.scaler.std, lambda x: f"{x:.9e}f"))
+    a("};")
+    a(f"static const double kEmotionInputScale = {model.input_scale};")
+    a(f"static const double kEmotionLogitScale = {model.logit_scale};")
+    a(f"static const double kEmotionLevelScale = {model.level_scale};")
+    a(f"static const double kEmotionTemperature = {model.temperature};")
+    a(f"static const uint8_t kEmotionMinConfidence = {model.min_confidence};")
+    a("")
 
-enum EmotionStatus : uint8_t {{
-    EMOTION_OK = 0,
-    EMOTION_LOW_CONFIDENCE = 1,
-    EMOTION_HIGH_MOTION = 2,
-    EMOTION_NO_DATA = 3,
-}};
+    def dump_layer(name: str, layer: Layer):
+        w = layer.weights.ravel().tolist()
+        b = layer.bias.tolist()
+        a(f"static const int8_t k{name}Weights[{len(w)}] = {{")
+        a("    " + ", ".join(str(int(x)) for x in w))
+        a("};")
+        a(f"static const int32_t k{name}Bias[{len(b)}] = {{")
+        a("    " + ", ".join(str(int(x)) for x in b))
+        a("};")
+        a(f"static const int32_t k{name}Mult = {layer.mult};")
+        a(f"static const uint8_t k{name}Shift = {layer.shift};")
+        a(f"static const int32_t k{name}InZero = {layer.in_zero};")
+        a(f"static const int32_t k{name}OutZero = {layer.out_zero};")
+        a(f"static const int32_t k{name}OutMin = {layer.out_min};")
+        a("")
 
-static const uint8_t EMOTION_NONE = 255;
-static const char* const EMOTION_NAMES[EMOTION_NUM_CLASSES] = {{"calm", "tense", "upbeat", "subdued"}};
+    dump_layer("Heart", model.heart)
+    dump_layer("Motion", model.motion)
+    dump_layer("Voice", model.voice)
+    dump_layer("Deep1", model.deep[0])
+    dump_layer("Deep2", model.deep[1])
+    dump_layer("Deep3", model.deep[2])
+    dump_layer("Emotion", model.emotion)
+    dump_layer("Intensity", model.intensity)
 
-struct EmotionResult {{
-    uint8_t status;
-    uint8_t emotion;
-    uint8_t confidence_pct;
-    uint8_t intensity_pct;
-}};
+    a("// ---------- Feature-extraction constants ----------")
+    a("static const uint16_t kEmotionMinEpochs[4] = {90, 90, 6, 6};")
+    a("static const double kEmotionMeanFloor[4] = {1.0, 10.0, 10.0, 1.0};")
+    a("static const double kEmotionBaselinePrior[4] = {70.0, 30.0, 160.0, 30.0};")
+    a("static const double kEmotionPeakSigma = 0.5;")
+    a("static const double kEmotionActivityGateMg = 150.0;")
+    a("static const double kEmotionBaselineAlphaMin = 0.01;")
+    a("")
 
-static const float kEmotionMean[18] = {{
-    {', '.join(f'{x:.9e}f' for x in model.scaler.mean.tolist())}
-}};
+    a("// ---------- Integer dense layer ----------")
+    a("static inline bool emotion_present(double x) { return x - x == 0.0; }")
+    a("")
+    a("static inline void emotion_dense(const int8_t* input, uint8_t n_in, int32_t in_zero,")
+    a("                                 const int8_t* weights, const int32_t* bias, int32_t mult,")
+    a("                                 uint8_t shift, uint8_t n_out, int32_t out_zero, int32_t out_min,")
+    a("                                 int8_t* output) {")
+    a("    for (uint8_t k = 0; k < n_out; ++k) {")
+    a("        int32_t sum = bias[k];")
+    a("        for (uint8_t i = 0; i < n_in; ++i) {")
+    a("            sum += (int32_t)(*weights++) * ((int32_t)input[i] - in_zero);")
+    a("        }")
+    a("        int64_t value = (int64_t)sum * mult;")
+    a("        value = (value + ((int64_t)1 << (shift - 1))) >> shift;")
+    a("        value += out_zero;")
+    a("        if (value < out_min) value = out_min;")
+    a("        if (value > 127) value = 127;")
+    a("        output[k] = (int8_t)value;")
+    a("    }")
+    a("}")
+    a("")
+    a("static inline int8_t emotion_quantize(double value, uint8_t index) {")
+    a("    if (!emotion_present(value)) return 0;")
+    a("    const double compressed = copysign(log1p(fabs(value)), value);")
+    a("    const double z = (compressed - kEmotionMean[index]) / kEmotionStd[index];")
+    a("    const double q = floor(z / kEmotionInputScale + 0.5);")
+    a("    if (q <= -127.0) return -127;")
+    a("    if (q >= 127.0) return 127;")
+    a("    return (int8_t)q;")
+    a("}")
+    a("")
+    a("static inline void emotion_forward(const int8_t input[EMOTION_NUM_FEATURES],")
+    a("                                   int8_t logits[EMOTION_NUM_CLASSES], int8_t* intensity) {")
+    a("    int8_t encoded[20];")
+    a("    emotion_dense(input, 4, kHeartInZero, kHeartWeights, kHeartBias, kHeartMult,")
+    a("                  kHeartShift, 6, kHeartOutZero, kHeartOutMin, encoded);")
+    a("    emotion_dense(input + 4, 4, kMotionInZero, kMotionWeights, kMotionBias, kMotionMult,")
+    a("                  kMotionShift, 6, kMotionOutZero, kMotionOutMin, encoded + 6);")
+    a("    emotion_dense(input + 8, 10, kVoiceInZero, kVoiceWeights, kVoiceBias, kVoiceMult,")
+    a("                  kVoiceShift, 8, kVoiceOutZero, kVoiceOutMin, encoded + 12);")
+    a("")
+    a("    int8_t deep1[16];")
+    a("    emotion_dense(encoded, 20, kDeep1InZero, kDeep1Weights, kDeep1Bias, kDeep1Mult,")
+    a("                  kDeep1Shift, 16, kDeep1OutZero, kDeep1OutMin, deep1);")
+    a("")
+    a("    int8_t deep2[12];")
+    a("    emotion_dense(deep1, 16, kDeep2InZero, kDeep2Weights, kDeep2Bias, kDeep2Mult,")
+    a("                  kDeep2Shift, 12, kDeep2OutZero, kDeep2OutMin, deep2);")
+    a("")
+    a("    int8_t deep3[8];")
+    a("    emotion_dense(deep2, 12, kDeep3InZero, kDeep3Weights, kDeep3Bias, kDeep3Mult,")
+    a("                  kDeep3Shift, 8, kDeep3OutZero, kDeep3OutMin, deep3);")
+    a("")
+    a("    emotion_dense(deep3, 8, kEmotionInZero, kEmotionWeights, kEmotionBias, kEmotionMult,")
+    a("                  kEmotionShift, 8, kEmotionOutZero, kEmotionOutMin, logits);")
+    a("    emotion_dense(deep3, 8, kIntensityInZero, kIntensityWeights, kIntensityBias, kIntensityMult,")
+    a("                  kIntensityShift, 1, kIntensityOutZero, kIntensityOutMin, intensity);")
+    a("}")
+    a("")
+    a("static inline EmotionResult emotion_decide(const int8_t logits[EMOTION_NUM_CLASSES],")
+    a("                                           const double features[EMOTION_NUM_FEATURES]) {")
+    a("    EmotionResult result;")
+    a("    result.emotion = EMOTION_NONE;")
+    a("    result.stability  = (float)features[0];")
+    a("    result.intensity  = (float)features[1];")
+    a("    result.burstiness = (float)features[2];")
+    a("    result.wavelength = (float)features[3];")
+    a("")
+    a("    uint8_t top = 0;")
+    a("    for (uint8_t j = 1; j < EMOTION_NUM_CLASSES; ++j) {")
+    a("        if (logits[j] > logits[top]) top = j;")
+    a("    }")
+    a("    double total = 0.0;")
+    a("    for (uint8_t j = 0; j < EMOTION_NUM_CLASSES; ++j) {")
+    a("        const double gap = (double)((int16_t)logits[j] - (int16_t)logits[top]);")
+    a("        total += exp(gap * kEmotionLogitScale / kEmotionTemperature);")
+    a("    }")
+    a("    result.confidence_pct = (uint8_t)floor(100.0 / total + 0.5);")
+    a("")
+    a("    if (result.confidence_pct < kEmotionMinConfidence) {")
+    a("        result.status = EMOTION_LOW_CONFIDENCE;")
+    a("        return result;")
+    a("    }")
+    a("    result.status = EMOTION_OK;")
+    a("    result.emotion = top;")
+    a("    return result;")
+    a("}")
+    a("")
+    a("static inline EmotionResult predict_emotion(const double features[EMOTION_NUM_FEATURES]) {")
+    a("    if (!emotion_present(features[0]) || !emotion_present(features[4])) {")
+    a("        EmotionResult result;")
+    a("        result.status = EMOTION_NO_DATA;")
+    a("        result.emotion = EMOTION_NONE;")
+    a("        result.confidence_pct = 0;")
+    a("        result.stability = result.intensity = result.burstiness = result.wavelength = 0.0f;")
+    a("        return result;")
+    a("    }")
+    a("    int8_t input[EMOTION_NUM_FEATURES];")
+    a("    for (uint8_t i = 0; i < EMOTION_NUM_FEATURES; ++i) {")
+    a("        input[i] = emotion_quantize(features[i], i);")
+    a("    }")
+    a("    int8_t logits[EMOTION_NUM_CLASSES];")
+    a("    int8_t level;")
+    a("    emotion_forward(input, logits, &level);")
+    a("    return emotion_decide(logits, features);")
+    a("}")
+    a("")
+    a("// ---------- Sliding 15-minute window ----------")
+    a("class EmotionWindow {")
+    a("public:")
+    a("    EmotionWindow() : filled_(0), mic_epochs_(0) {")
+    a("        for (uint8_t c = 0; c < 4; ++c) {")
+    a("            baseline_[c] = kEmotionBaselinePrior[c];")
+    a("            count_[c] = 0;")
+    a("        }")
+    a("        for (uint8_t i = 0; i < EMOTION_NUM_FEATURES; ++i) features_[i] = NAN;")
+    a("    }")
+    a("    bool push(float hr_bpm, float motion_mg, float pitch_hz, float energy_db, bool mic_on,")
+    a("              EmotionResult& result) {")
+    a("        buffer_[0][filled_] = clean(hr_bpm);")
+    a("        buffer_[1][filled_] = clean(motion_mg);")
+    a("        buffer_[2][filled_] = mic_on ? clean(pitch_hz) : NAN;")
+    a("        buffer_[3][filled_] = mic_on ? clean(energy_db) : NAN;")
+    a("        if (mic_on) ++mic_epochs_;")
+    a("        if (++filled_ < EMOTION_WINDOW_EPOCHS) return false;")
+    a("        finish(result);")
+    a("        filled_ = 0;")
+    a("        mic_epochs_ = 0;")
+    a("        return true;")
+    a("    }")
+    a("    const double* features() const { return features_; }")
+    a("private:")
+    a("    static float clean(float x) { return emotion_present(x) ? x : NAN; }")
+    a("    void summarize(uint8_t channel, double& mean, double& spread, uint16_t& count) const {")
+    a("        double total = 0.0;")
+    a("        count = 0;")
+    a("        for (uint16_t i = 0; i < EMOTION_WINDOW_EPOCHS; ++i) {")
+    a("            const double x = buffer_[channel][i];")
+    a("            if (emotion_present(x)) { total += x; ++count; }")
+    a("        }")
+    a("        const uint16_t divisor = count > 0 ? count : 1;")
+    a("        mean = total / divisor;")
+    a("        double squares = 0.0;")
+    a("        for (uint16_t i = 0; i < EMOTION_WINDOW_EPOCHS; ++i) {")
+    a("            const double x = buffer_[channel][i];")
+    a("            if (emotion_present(x)) squares += (x - mean) * (x - mean);")
+    a("        }")
+    a("        spread = sqrt(squares / divisor);")
+    a("    }")
+    a("    double peakInterval(uint8_t channel, double mean, double spread) const {")
+    a("        const double threshold = mean + kEmotionPeakSigma * spread;")
+    a("        const float* x = buffer_[channel];")
+    a("        uint16_t first = 0, last = 0, peaks = 0;")
+    a("        for (uint16_t i = 1; i + 1 < EMOTION_WINDOW_EPOCHS; ++i) {")
+    a("            const double before = x[i - 1], here = x[i], after = x[i + 1];")
+    a("            if (here > before && here >= after && here > threshold) {")
+    a("                if (peaks == 0) first = i;")
+    a("                last = i;")
+    a("                ++peaks;")
+    a("            }")
+    a("        }")
+    a("        if (peaks < 2) return (double)EMOTION_WINDOW_EPOCHS * EMOTION_EPOCH_SEC;")
+    a("        return (double)(last - first) / (peaks - 1) * EMOTION_EPOCH_SEC;")
+    a("    }")
+    a("    void finish(EmotionResult& result) {")
+    a("        double mean[4], spread[4];")
+    a("        uint16_t count[4];")
+    a("        bool usable[4];")
+    a("        for (uint8_t c = 0; c < 4; ++c) {")
+    a("            summarize(c, mean[c], spread[c], count[c]);")
+    a("            usable[c] = count[c] >= kEmotionMinEpochs[c];")
+    a("        }")
+    a("        const bool voice_ok = usable[2] && usable[3];")
+    a("        for (uint8_t i = 0; i < EMOTION_NUM_FEATURES; ++i) features_[i] = NAN;")
+    a("        for (uint8_t c = 0; c < 4; ++c) {")
+    a("            if (!usable[c] || (c >= 2 && !voice_ok)) continue;")
+    a("            const double magnitude = fabs(mean[c]);")
+    a("            const double divisor = magnitude > kEmotionMeanFloor[c] ? magnitude : kEmotionMeanFloor[c];")
+    a("            features_[c * 4 + 0] = spread[c];")
+    a("            features_[c * 4 + 1] = mean[c] - baseline_[c];")
+    a("            features_[c * 4 + 2] = spread[c] / divisor;")
+    a("            features_[c * 4 + 3] = peakInterval(c, mean[c], spread[c]);")
+    a("        }")
+    a("        if (voice_ok) {")
+    a("            features_[16] = (double)count[2] / (mic_epochs_ > 0 ? mic_epochs_ : 1);")
+    a("            features_[17] = 1.0;")
+    a("        } else {")
+    a("            features_[17] = 0.0;")
+    a("        }")
+    a("        if (!usable[0] || !usable[1]) {")
+    a("            result.status = EMOTION_NO_DATA;")
+    a("            result.emotion = EMOTION_NONE;")
+    a("            result.confidence_pct = 0;")
+    a("            result.stability = result.intensity = result.burstiness = result.wavelength = 0.0f;")
+    a("        } else if (mean[1] >= kEmotionActivityGateMg) {")
+    a("            result.status = EMOTION_HIGH_MOTION;")
+    a("            result.emotion = EMOTION_NONE;")
+    a("            result.confidence_pct = 0;")
+    a("            result.stability  = (float)features_[0];")
+    a("            result.intensity  = (float)features_[1];")
+    a("            result.burstiness = (float)features_[2];")
+    a("            result.wavelength = (float)features_[3];")
+    a("        } else {")
+    a("            result = predict_emotion(features_);")
+    a("        }")
+    a("        if (usable[1] && mean[1] < kEmotionActivityGateMg) {")
+    a("            for (uint8_t c = 0; c < 4; ++c) {")
+    a("                if (!usable[c]) continue;")
+    a("                ++count_[c];")
+    a("                double alpha = 1.0 / (count_[c] + 1.0);")
+    a("                if (alpha < kEmotionBaselineAlphaMin) alpha = kEmotionBaselineAlphaMin;")
+    a("                baseline_[c] += alpha * (mean[c] - baseline_[c]);")
+    a("            }")
+    a("        }")
+    a("    }")
+    a("    float buffer_[4][EMOTION_WINDOW_EPOCHS];")
+    a("    uint16_t filled_;")
+    a("    uint16_t mic_epochs_;")
+    a("    double baseline_[4];")
+    a("    uint32_t count_[4];")
+    a("    double features_[EMOTION_NUM_FEATURES];")
+    a("};")
+    a("")
 
-static const float kEmotionStd[18] = {{
-    {', '.join(f'{x:.9e}f' for x in model.scaler.std.tolist())}
-}};
-
-static const double kEmotionInputScale = {model.input_scale};
-static const double kEmotionLogitScale = {model.logit_scale};
-static const double kEmotionLevelScale = {model.level_scale};
-static const double kEmotionTemperature = {model.temperature};
-static const uint8_t kEmotionMinConfidence = {model.min_confidence};
-
-static const int8_t kHeartWeights[{len(model.heart.weights.ravel())}] = {{
-    {', '.join(map(str, model.heart.weights.ravel().tolist()))}
-}};
-static const int32_t kHeartBias[{len(model.heart.bias)}] = {{
-    {', '.join(map(str, model.heart.bias.tolist()))}
-}};
-
-static const int8_t kMotionWeights[{len(model.motion.weights.ravel())}] = {{
-    {', '.join(map(str, model.motion.weights.ravel().tolist()))}
-}};
-static const int32_t kMotionBias[{len(model.motion.bias)}] = {{
-    {', '.join(map(str, model.motion.bias.tolist()))}
-}};
-
-static const int8_t kVoiceWeights[{len(model.voice.weights.ravel())}] = {{
-    {', '.join(map(str, model.voice.weights.ravel().tolist()))}
-}};
-static const int32_t kVoiceBias[{len(model.voice.bias)}] = {{
-    {', '.join(map(str, model.voice.bias.tolist()))}
-}};
-
-static const int8_t kDeep1Weights[{len(model.deep[0].weights.ravel())}] = {{
-    {', '.join(map(str, model.deep[0].weights.ravel().tolist()))}
-}};
-static const int32_t kDeep1Bias[{len(model.deep[0].bias)}] = {{
-    {', '.join(map(str, model.deep[0].bias.tolist()))}
-}};
-
-static const int8_t kDeep2Weights[{len(model.deep[1].weights.ravel())}] = {{
-    {', '.join(map(str, model.deep[1].weights.ravel().tolist()))}
-}};
-static const int32_t kDeep2Bias[{len(model.deep[1].bias)}] = {{
-    {', '.join(map(str, model.deep[1].bias.tolist()))}
-}};
-
-static const int8_t kDeep3Weights[{len(model.deep[2].weights.ravel())}] = {{
-    {', '.join(map(str, model.deep[2].weights.ravel().tolist()))}
-}};
-static const int32_t kDeep3Bias[{len(model.deep[2].bias)}] = {{
-    {', '.join(map(str, model.deep[2].bias.tolist()))}
-}};
-
-static const int8_t kEmotionWeights[{len(model.emotion.weights.ravel())}] = {{
-    {', '.join(map(str, model.emotion.weights.ravel().tolist()))}
-}};
-static const int32_t kEmotionBias[{len(model.emotion.bias)}] = {{
-    {', '.join(map(str, model.emotion.bias.tolist()))}
-}};
-
-static const int8_t kIntensityWeights[{len(model.intensity.weights.ravel())}] = {{
-    {', '.join(map(str, model.intensity.weights.ravel().tolist()))}
-}};
-static const int32_t kIntensityBias[{len(model.intensity.bias)}] = {{
-    {', '.join(map(str, model.intensity.bias.tolist()))}
-}};
-"""
+    content = "\n".join(lines)
     with open("emotion_model.h", "w", encoding="utf-8") as f:
-        f.write(header_content)
-    print("\n[SUCCESS] File 'emotion_model.h' has been generated automatically!")
+        f.write(content)
+    print("\n[SUCCESS] Complete file 'emotion_model.h' has been generated!")
 
 
-def main() -> Tuple[List[Dict[str, np.ndarray]], np.ndarray, FusionNet, QuantizedNet, Dataset]:
-    print(f"Simulating {PEOPLE} people")
+def main():
+    print(f"Simulating {PEOPLE} people with 8 emotions")
     rng = np.random.default_rng(SEED)
     people = [simulate_person(rng) for _ in range(PEOPLE)]
     print("Extracting 15-minute features")
@@ -673,7 +900,7 @@ def main() -> Tuple[List[Dict[str, np.ndarray]], np.ndarray, FusionNet, Quantize
     parameters = sum(p.numel() for p in net.parameters())
     print(f"\nNetwork: {parameters} parameters")
     print(f"Simulated test people: {len(test_ids)}, {len(test_set.y)} windows")
-    guessing = np.bincount(test_set.y).max() / len(test_set.y)
+    guessing = np.bincount(test_set.y, minlength=8).max() / max(len(test_set.y), 1)
     print(f"Always guessing the commonest emotion: {guessing:.3f}")
     print(f"Accuracy, float: {(float_logits.argmax(dim=1).numpy() == test_set.y).mean():.3f}")
     print(f"Accuracy, int8: {hit.mean():.3f}")
