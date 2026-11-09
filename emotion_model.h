@@ -1,11 +1,11 @@
 // emotion_model.h - Generated automatically by emotion_training.py
-// Header-only int8 emotion estimator. Matches the Python quantizer (zero-point 0 + ReLU).
+// 8 emotions + stability / intensity / burstiness / wavelength per 15-min window
 #pragma once
 #include <math.h>
 #include <stdint.h>
 
 #define EMOTION_NUM_FEATURES 18
-#define EMOTION_NUM_CLASSES 4
+#define EMOTION_NUM_CLASSES 8
 #define EMOTION_WINDOW_EPOCHS 180
 #define EMOTION_EPOCH_SEC 5
 
@@ -17,135 +17,131 @@ enum EmotionStatus : uint8_t {
 };
 
 static const uint8_t EMOTION_NONE = 255;
-static const char* const EMOTION_NAMES[EMOTION_NUM_CLASSES] = {"calm", "tense", "upbeat", "subdued"};
+static const char* const EMOTION_NAMES[EMOTION_NUM_CLASSES] = {
+    "calm", "tense", "upbeat", "subdued", "happy", "sad", "angry", "tired"
+};
 
+// Final output for every 15-minute window
 struct EmotionResult {
-    uint8_t status;
-    uint8_t emotion;
-    uint8_t confidence_pct;
-    uint8_t intensity_pct;
+    uint8_t status;           // OK / LOW_CONFIDENCE / HIGH_MOTION / NO_DATA
+    uint8_t emotion;          // 0..7 or 255
+    uint8_t confidence_pct;   // 0..100
+    float   stability;        // HR stability (std)
+    float   intensity;        // HR intensity (mean - baseline)
+    float   burstiness;       // HR burstiness (std / |mean|)
+    float   wavelength;       // HR peak interval (seconds)
 };
 
 // ---------- Scaler ----------
 static const float kEmotionMean[18] = {
-    1.191586018e+00f, -2.869473994e-01f, 3.565438464e-02f, 3.961068392e+00f, 2.836739779e+00f, -3.239322901e-01f, 4.256844223e-01f, 3.891646147e+00f, 2.141262531e+00f, -2.226742059e-01f, 4.883952439e-02f, 5.183603764e+00f, 1.063718915e+00f, -6.664302200e-02f, 6.187747046e-02f, 5.163547516e+00f, 2.469219863e-01f, 6.931471825e-01f
+    1.211127639e+00f, -2.210136652e-01f, 3.499699757e-02f, 3.963840246e+00f, 2.802989006e+00f, -3.463999331e-01f, 4.305724204e-01f, 3.899808168e+00f, 2.172212839e+00f, -1.777093560e-01f, 5.164336041e-02f, 5.296133518e+00f, 1.068146110e+00f, -1.783337444e-02f, 6.221369281e-02f, 5.296145916e+00f, 2.263343185e-01f, 6.931471825e-01f
 };
 static const float kEmotionStd[18] = {
-    3.314231634e-01f, 1.630297422e+00f, 2.566689998e-02f, 4.079641402e-01f, 5.080509782e-01f, 2.145584106e+00f, 9.891676158e-02f, 3.329486251e-01f, 4.733018875e-01f, 1.733144999e+00f, 2.381089330e-02f, 1.200083256e+00f, 1.119166166e-01f, 9.653975964e-01f, 1.205722615e-02f, 1.186577797e+00f, 1.350605786e-01f, 1.000000000e+00f
+    3.416048884e-01f, 1.738614082e+00f, 2.459247410e-02f, 4.077167213e-01f, 5.976523161e-01f, 2.272948027e+00f, 1.099099144e-01f, 3.710335195e-01f, 5.490010381e-01f, 2.144970655e+00f, 2.614963055e-02f, 1.229776144e+00f, 1.333916485e-01f, 1.297980785e+00f, 1.576537080e-02f, 1.227338910e+00f, 1.319180131e-01f, 1.000000000e+00f
 };
 static const double kEmotionInputScale = 0.03937007859349251;
-static const double kEmotionLogitScale = 0.05308373518816129;
-static const double kEmotionLevelScale = 0.008925645370183028;
-static const double kEmotionTemperature = 1.0;
-static const uint8_t kEmotionMinConfidence = 61;
-
-// ---------- Quantized layers (weights, bias, mult, shift, zeros) ----------
+static const double kEmotionLogitScale = 0.14616628331462228;
+static const double kEmotionLevelScale = 0.00815317574448473;
+static const double kEmotionTemperature = 1.05;
+static const uint8_t kEmotionMinConfidence = 67;
 
 static const int8_t kHeartWeights[24] = {
-    -44, -87, 2, 32, -112, 0, -51, 14, 51, 127, 5, 16, -73, -14, 22, -54, 2, -95, 62, -58, 55, -49, 60, 51
+    -16, -78, 45, 14, -92, -1, 11, 23, 17, 127, 4, -16, -98, -21, 32, -41, -2, -84, 73, -57, 56, 59, 11, 42
 };
 static const int32_t kHeartBias[6] = {
-    -880, 56, 1372, -385, -414, 152
+    -756, 91, 1154, 619, -886, -1332
 };
-static const int32_t kHeartMult = 1382634568;
+static const int32_t kHeartMult = 1406681125;
 static const uint8_t kHeartShift = 37;
 static const int32_t kHeartInZero = 0;
 static const int32_t kHeartOutZero = 0;
 static const int32_t kHeartOutMin = 0;
 
-
 static const int8_t kMotionWeights[24] = {
-    36, 70, 2, 7, 33, 102, -79, -1, 20, 3, 53, -57, -75, 100, 68, 5, -77, -127, 55, 1, -124, 55, 48, 28
+    61, 99, -43, 17, 10, 86, -54, 13, 26, 21, 23, -75, -91, 108, 68, -33, -57, -127, 47, -6, -77, 110, 17, 18
 };
 static const int32_t kMotionBias[6] = {
-    -1692, 2232, -1667, 194, 128, 1043
+    -2049, 2462, -2848, 109, -364, 500
 };
-static const int32_t kMotionMult = 1123685551;
+static const int32_t kMotionMult = 1086316340;
 static const uint8_t kMotionShift = 37;
 static const int32_t kMotionInZero = 0;
 static const int32_t kMotionOutZero = 0;
 static const int32_t kMotionOutMin = 0;
 
-
 static const int8_t kVoiceWeights[80] = {
-    15, 39, 49, -15, 8, 35, -32, 2, 15, 49, 30, -8, 69, -3, 4, 53, 13, 4, 27, -42, 62, -1, -99, -5, -36, -42, 47, 0, 5, 37, -2, -29, -73, -51, -55, -28, -16, -3, 49, 32, 8, -68, -87, -2, -14, -82, 14, -7, -7, 20, -36, 116, 20, -20, 20, -24, -19, -4, -2, 7, 29, -81, 59, 0, 6, 33, -29, -13, -13, 1, -29, -27, -127, 24, 34, -14, 29, -27, 50, -25
+    2, 14, 14, -18, 6, 109, -6, -25, 24, 16, 27, -22, 40, 5, -13, 60, 21, 20, 3, -35, 0, -27, 15, 1, -7, -60, 41, 6, -28, 25, -36, -44, -65, 8, -42, -73, -16, 19, -19, 22, -11, -62, -41, 0, -9, -66, 35, -8, -11, 13, -23, 39, 1, 24, 21, 51, -27, 22, -60, 5, -28, -53, 58, -12, 36, -12, -27, -1, 19, 7, -28, -36, -127, -10, 42, -14, 14, 10, 17, -31
 };
 static const int32_t kVoiceBias[8] = {
-    790, 1750, 545, -37, -2976, 1, 2069, 303
+    121, 1228, -675, -6, -1879, -15, 703, 0
 };
-static const int32_t kVoiceMult = 1461775416;
+static const int32_t kVoiceMult = 1924454739;
 static const uint8_t kVoiceShift = 37;
 static const int32_t kVoiceInZero = 0;
 static const int32_t kVoiceOutZero = 0;
 static const int32_t kVoiceOutMin = 0;
 
-
 static const int8_t kDeep1Weights[320] = {
-    27, -14, 12, -4, -6, -3, 27, 45, -7, 15, 44, -29, -79, -16, 19, -4, -27, -75, -29, -15, 9, 19, 24, -23, 23, -8, -7, -1, -24, 4, 13, -12, 17, -30, -18, 17, -74, 55, -74, 8, 3, -26, 73, 17, -5, -46, -10, -2, -23, 6, 15, -35, 6, 25, -92, -25, -23, 14, 1, -59, 43, 47, -28, 34, 1, 16, 16, 26, 10, 1, 34, -9, 28, 42, 16, 15, 52, -20, 15, 18, 25, -1, -24, 15, 24, 18, 32, -2, 13, -36, 68, -18, 2, 11, 2, -8, 71, 35, -21, -19, -19, 10, -31, 3, 9, -14, -6, 53, 14, 21, -11, -10, -1, 51, 21, -13, -39, -44, 27, 13, 47, 31, -58, 11, 31, 27, -41, -20, -16, -53, 54, -7, 5, 31, -31, -45, 1, -44, -50, -66, -38, -51, 5, -23, -28, -20, 36, 50, -13, 48, -2, 36, 54, 31, -26, -11, 4, -32, 12, -54, 0, -82, 60, -69, -41, -16, 9, 21, -30, 25, 5, -41, -3, -12, -65, -3, -6, -6, 8, -41, -51, -40, 41, 2, -27, -62, 9, 33, -14, 26, -7, -6, 2, 36, 38, -9, -51, -19, 51, 13, -24, 13, -15, -9, -11, 4, -26, -18, -9, 12, -12, 9, 21, -3, -24, -6, 4, -11, -27, 6, 21, -4, 57, 29, 13, -19, -9, -13, -24, 4, 33, -13, -10, -16, 27, 27, 61, 65, -46, 26, 22, 7, 5, -14, -15, -27, 18, 20, -21, -5, 21, 14, 23, 48, 21, -16, 19, -4, 8, 0, 36, 34, 1, 3, 12, 32, -20, 14, 7, -21, 23, 11, -33, 8, 68, 14, -30, -24, 34, 34, -62, -31, -7, -61, -8, -3, 51, 18, 4, 5, -3, 6, 64, 24, -25, -127, -23, 19, 13, -55, 3, -9, -4, -2, 16, -9, 20, 42, -21, 3, -4, 8, 15, 59, 23, 10, 20, -31, -20, -4
+    35, -5, 15, -15, -18, 5, 21, 5, -23, 13, 33, 5, -34, 13, 9, -11, 30, -20, -11, -54, 38, 11, -19, -1, 8, -18, -14, -11, -40, 27, 21, 9, 10, 18, 25, 5, 27, -78, -17, -14, 59, 15, 4, 20, 26, -46, 5, 14, 20, -2, 33, 5, -12, 32, -31, -127, -44, -20, -3, -66, 36, 23, -9, 13, 7, 25, 1, -6, 23, 3, 17, -12, 32, 16, -18, 6, 26, -37, -9, 2, 32, 32, -16, 40, 24, 8, 36, 28, 14, 5, 33, 6, -19, -2, -19, -2, 24, 1, -35, 21, -35, -10, 11, -16, -2, 16, -5, 18, -10, 41, -15, 5, -10, 43, -26, -49, -17, 29, 34, -24, -17, 22, -34, -2, 23, -8, -36, -9, -17, 0, 1, 21, 33, 33, -13, -45, -28, 10, -15, -93, -24, -32, 2, -24, -22, 1, 26, 35, -42, 34, -20, 24, -6, 21, -22, -16, -24, -28, 4, -67, 30, -16, 54, -48, -28, 15, 0, 1, -5, 21, 20, -7, -4, -37, 23, -10, -17, 5, -23, -8, -24, -27, 30, -4, -10, -26, 3, 14, -17, 16, 10, 3, 18, 30, -23, -19, -43, 34, 35, -21, -3, 25, -21, 13, 10, 12, -35, -30, -15, 10, 19, 11, 43, 1, -24, 0, 2, 40, -43, 22, 34, 7, 20, 23, 18, -3, 7, 7, 15, 2, 40, 7, -53, -8, -4, 21, 11, 29, -18, 27, -2, 17, -3, -2, 14, -26, 17, 3, -3, -24, 36, 5, -21, 24, -4, 1, 6, 5, 1, 5, -13, -1, 25, -26, 4, -6, -8, -11, -27, -46, -19, -8, -2, 6, 35, 24, 41, 1, 47, -10, -50, 10, 12, -16, -27, 8, 32, 25, -14, 6, -14, 7, 24, 9, -26, 7, -35, 32, 33, 5, -15, -4, 4, -8, 8, -1, 22, 23, -40, -1, -3, 19, -44, 23, 15, 10, -36, -40, 1, 2
 };
 static const int32_t kDeep1Bias[16] = {
-    2069, 850, 1025, -507, -2178, 1688, -1192, 1350, 818, 1449, -741, -922, 1404, 1078, 1307, -764
+    601, 95, 929, -899, -449, 783, -180, 532, 315, 778, -843, 59, 1002, 25, 1450, 68
 };
-static const int32_t kDeep1Mult = 1292872846;
+static const int32_t kDeep1Mult = 1868545101;
 static const uint8_t kDeep1Shift = 37;
 static const int32_t kDeep1InZero = 0;
 static const int32_t kDeep1OutZero = 0;
 static const int32_t kDeep1OutMin = 0;
 
-
 static const int8_t kDeep2Weights[192] = {
-    0, 17, 49, -13, -5, -7, -20, 44, 40, 31, -23, 21, 31, -44, 14, 5, 21, -127, 7, 30, 33, 20, 46, 21, -24, -20, 8, -46, 22, -6, 34, 26, 5, -7, 1, -32, -57, 35, -31, 21, 26, 41, 4, -15, 23, 9, 15, 10, -3, -10, 31, 7, 40, -15, 65, 1, 17, -9, -9, 33, 16, 4, 6, 8, 20, 10, 8, -27, -65, 21, -34, 8, -19, 12, -13, -20, -5, 25, -38, -22, 23, -22, -20, 2, 6, 13, 53, -18, -5, 15, -15, 9, 13, 31, -38, 0, -14, 8, -10, 3, 0, -16, -20, -7, 11, -5, -5, -15, -15, -3, -6, 8, 52, -5, 5, -10, -42, 19, -46, 44, 30, 34, 14, -27, -4, 7, 34, -2, 25, 91, -19, -11, -43, -1, -53, -16, -46, 34, 8, -18, 5, 32, -39, -21, 41, -74, -36, 43, -38, 29, -14, 15, -33, 15, -10, -12, 31, 37, -9, 14, 12, -20, -3, 11, -21, 2, -28, -18, 3, -19, -12, 8, -8, -20, 13, -25, 22, -60, -4, 16, 48, 9, 27, 2, -5, -14, 11, 16, 4, 23, 1, 6
+    -47, -25, 5, 15, 12, -36, -44, 20, -37, -49, -46, 40, 10, -32, -33, -26, -4, -16, 26, 44, 42, 22, 88, 31, -74, -11, 127, 10, 34, -53, 32, 38, 0, -27, 4, -29, -29, 49, 1, 29, 62, 49, -12, -18, 45, 60, 30, 31, 4, -5, 46, 48, 12, -28, 49, 0, -29, -23, 25, 49, 16, 3, 15, 9, 51, 29, 80, 10, -13, 24, 43, 17, -6, 16, -21, -16, 3, 70, -38, -10, 20, -15, 25, 6, -24, 6, 36, -2, -54, 19, -35, 17, 29, 49, -24, 4, -19, 7, -11, 1, -4, -17, -23, -6, 10, -6, -6, -20, -18, -6, -11, 9, 60, -33, 9, 0, -35, 35, 7, 68, 73, 41, 47, -53, 4, 12, 46, 34, 89, 90, 34, 41, 44, -41, 12, -23, -12, -7, 27, 13, -8, 72, -94, -1, 21, -103, 8, 1, -26, 35, 45, 37, -31, 33, 54, -21, 24, -3, -15, 9, 28, -24, 7, 8, 2, 21, -50, -40, 27, -16, 15, 25, -21, -40, 15, -69, 54, 14, 54, 44, 40, 3, 59, 25, -27, -13, 90, 36, -11, -22, -5, 18
 };
 static const int32_t kDeep2Bias[12] = {
-    -105, -379, 1214, 885, 1481, 1110, -108, 1043, 844, 328, 81, 360
+    16, 182, 1348, 925, 909, 1244, -183, 653, -1446, 8, 305, -173
 };
-static const int32_t kDeep2Mult = 1942178406;
+static const int32_t kDeep2Mult = 1661437005;
 static const uint8_t kDeep2Shift = 38;
 static const int32_t kDeep2InZero = 0;
 static const int32_t kDeep2OutZero = 0;
 static const int32_t kDeep2OutMin = 0;
 
-
 static const int8_t kDeep3Weights[96] = {
-    -12, -101, 44, 29, 72, 22, 22, 40, 94, -53, 12, -17, 9, -4, -21, -29, -24, 4, 38, -15, -33, -36, 16, 17, -34, 27, 41, -80, 49, -15, -16, 54, 61, 67, 31, -20, 80, -17, 67, -3, 0, -25, 6, 78, -46, -28, 21, -34, -19, 127, -5, 23, -23, 23, 25, 31, -103, 30, -37, 49, 31, 40, 18, -3, -39, -26, 24, 39, 57, -18, -25, 5, 53, -46, -48, 51, -43, -14, -23, -53, 19, -7, -11, 40, -95, 38, -5, 44, 18, 79, -25, -33, 69, 78, -33, 59
+    -21, -55, 37, 31, 39, 27, 14, 46, 13, 0, 16, 2, 7, -3, -17, -24, -19, 3, 30, -12, -27, -29, 13, 14, -95, 77, 18, -37, 52, 3, -16, 35, -77, 73, 25, 37, 123, -8, 48, 14, -3, 38, 5, 46, -30, 44, -53, 6, 19, 88, -24, 43, -1, 47, 27, -4, -77, 14, -29, 57, 6, 32, 28, -49, -55, -103, 19, 59, -29, -3, -79, 2, 26, 9, -65, 62, 77, 13, -23, -45, 127, -36, 1, 88, 4, 68, -16, 29, -51, -16, -23, -10, 9, 22, -15, 30
 };
 static const int32_t kDeep3Bias[8] = {
-    490, -606, 140, 258, -257, -541, 260, 729
+    764, -418, -1211, 245, 778, -731, -839, -125
 };
-static const int32_t kDeep3Mult = 1481545280;
+static const int32_t kDeep3Mult = 1521708580;
 static const uint8_t kDeep3Shift = 38;
 static const int32_t kDeep3InZero = 0;
 static const int32_t kDeep3OutZero = 0;
 static const int32_t kDeep3OutMin = 0;
 
-
-static const int8_t kEmotionWeights[32] = {
-    92, 8, 66, -100, -45, -80, -127, 23, 69, 33, -54, 70, -78, 9, -29, -53, -98, 40, 82, 13, 28, 32, -39, -98, -46, 33, -125, -32, 92, 8, 75, 107
+static const int8_t kEmotionWeights[64] = {
+    11, 5, -77, -17, 60, -21, -55, 26, 48, 21, 0, 39, -127, -13, -127, -48, -7, 25, 51, 24, 0, -40, -53, -45, -16, 20, -46, -17, 27, 64, 24, 35, -15, -1, 48, -8, 19, -47, -64, 39, 25, -23, 1, -45, -1, -79, 25, -32, -32, 8, 29, 20, -52, 72, 1, -3, -22, 9, 3, -64, 7, 62, 37, 39
 };
-static const int32_t kEmotionBias[4] = {
-    867, 388, 134, -1282
+static const int32_t kEmotionBias[8] = {
+    1867, 286, -692, -509, -263, 350, -613, -707
 };
-static const int32_t kEmotionMult = 1988950370;
+static const int32_t kEmotionMult = 1627672920;
 static const uint8_t kEmotionShift = 38;
 static const int32_t kEmotionInZero = 0;
 static const int32_t kEmotionOutZero = 0;
 static const int32_t kEmotionOutMin = -127;
 
-
 static const int8_t kIntensityWeights[8] = {
-    94, -74, -49, 77, 122, -127, 100, 24
+    127, 42, 0, -37, 9, 15, 5, 69
 };
 static const int32_t kIntensityBias[1] = {
-    -798
+    -582
 };
-static const int32_t kIntensityMult = 1974225851;
-static const uint8_t kIntensityShift = 37;
+static const int32_t kIntensityMult = 1474831156;
+static const uint8_t kIntensityShift = 36;
 static const int32_t kIntensityInZero = 0;
 static const int32_t kIntensityOutZero = 0;
 static const int32_t kIntensityOutMin = -127;
 
-
-// ---------- Feature-extraction constants (same as Python) ----------
+// ---------- Feature-extraction constants ----------
 static const uint16_t kEmotionMinEpochs[4] = {90, 90, 6, 6};
 static const double kEmotionMeanFloor[4] = {1.0, 10.0, 10.0, 1.0};
 static const double kEmotionBaselinePrior[4] = {70.0, 30.0, 160.0, 30.0};
@@ -153,7 +149,7 @@ static const double kEmotionPeakSigma = 0.5;
 static const double kEmotionActivityGateMg = 150.0;
 static const double kEmotionBaselineAlphaMin = 0.01;
 
-// ---------- Integer dense layer (matches Python Layer.__call__) ----------
+// ---------- Integer dense layer ----------
 static inline bool emotion_present(double x) { return x - x == 0.0; }
 
 static inline void emotion_dense(const int8_t* input, uint8_t n_in, int32_t in_zero,
@@ -168,7 +164,6 @@ static inline void emotion_dense(const int8_t* input, uint8_t n_in, int32_t in_z
         int64_t value = (int64_t)sum * mult;
         value = (value + ((int64_t)1 << (shift - 1))) >> shift;
         value += out_zero;
-        // out_min implements ReLU when out_min == out_zero (usually 0)
         if (value < out_min) value = out_min;
         if (value > 127) value = 127;
         output[k] = (int8_t)value;
@@ -188,7 +183,6 @@ static inline int8_t emotion_quantize(double value, uint8_t index) {
 static inline void emotion_forward(const int8_t input[EMOTION_NUM_FEATURES],
                                    int8_t logits[EMOTION_NUM_CLASSES], int8_t* intensity) {
     int8_t encoded[20];
-    // Encoder branches (ReLU via out_min == 0)
     emotion_dense(input, 4, kHeartInZero, kHeartWeights, kHeartBias, kHeartMult,
                   kHeartShift, 6, kHeartOutZero, kHeartOutMin, encoded);
     emotion_dense(input + 4, 4, kMotionInZero, kMotionWeights, kMotionBias, kMotionMult,
@@ -208,47 +202,45 @@ static inline void emotion_forward(const int8_t input[EMOTION_NUM_FEATURES],
     emotion_dense(deep2, 12, kDeep3InZero, kDeep3Weights, kDeep3Bias, kDeep3Mult,
                   kDeep3Shift, 8, kDeep3OutZero, kDeep3OutMin, deep3);
 
-    // Heads (no ReLU, out_min = -127)
     emotion_dense(deep3, 8, kEmotionInZero, kEmotionWeights, kEmotionBias, kEmotionMult,
-                  kEmotionShift, 4, kEmotionOutZero, kEmotionOutMin, logits);
+                  kEmotionShift, 8, kEmotionOutZero, kEmotionOutMin, logits);
     emotion_dense(deep3, 8, kIntensityInZero, kIntensityWeights, kIntensityBias, kIntensityMult,
                   kIntensityShift, 1, kIntensityOutZero, kIntensityOutMin, intensity);
 }
 
-static inline EmotionResult emotion_decide(const int8_t logits[EMOTION_NUM_CLASSES], int8_t level) {
+static inline EmotionResult emotion_decide(const int8_t logits[EMOTION_NUM_CLASSES],
+                                           const double features[EMOTION_NUM_FEATURES]) {
     EmotionResult result;
-    result.emotion = EMOTION_NONE;
-    result.intensity_pct = 0;
+    result.stability  = (float)features[0];
+    result.intensity  = (float)features[1];
+    result.burstiness = (float)features[2];
+    result.wavelength = (float)features[3];
+
     uint8_t top = 0;
     for (uint8_t j = 1; j < EMOTION_NUM_CLASSES; ++j) {
         if (logits[j] > logits[top]) top = j;
     }
+
     double total = 0.0;
     for (uint8_t j = 0; j < EMOTION_NUM_CLASSES; ++j) {
         const double gap = (double)((int16_t)logits[j] - (int16_t)logits[top]);
         total += exp(gap * kEmotionLogitScale / kEmotionTemperature);
     }
     result.confidence_pct = (uint8_t)floor(100.0 / total + 0.5);
-    if (result.confidence_pct < kEmotionMinConfidence) {
-        result.status = EMOTION_LOW_CONFIDENCE;
-        return result;
-    }
-    double percent = floor((double)level * kEmotionLevelScale * 100.0 + 0.5);
-    if (percent < 0.0) percent = 0.0;
-    if (percent > 100.0) percent = 100.0;
-    result.status = EMOTION_OK;
     result.emotion = top;
-    result.intensity_pct = (uint8_t)percent;
+    result.status  = (result.confidence_pct < kEmotionMinConfidence)
+                         ? EMOTION_LOW_CONFIDENCE
+                         : EMOTION_OK;
+
     return result;
 }
-
 static inline EmotionResult predict_emotion(const double features[EMOTION_NUM_FEATURES]) {
     if (!emotion_present(features[0]) || !emotion_present(features[4])) {
         EmotionResult result;
         result.status = EMOTION_NO_DATA;
         result.emotion = EMOTION_NONE;
         result.confidence_pct = 0;
-        result.intensity_pct = 0;
+        result.stability = result.intensity = result.burstiness = result.wavelength = 0.0f;
         return result;
     }
     int8_t input[EMOTION_NUM_FEATURES];
@@ -258,10 +250,10 @@ static inline EmotionResult predict_emotion(const double features[EMOTION_NUM_FE
     int8_t logits[EMOTION_NUM_CLASSES];
     int8_t level;
     emotion_forward(input, logits, &level);
-    return emotion_decide(logits, level);
+    return emotion_decide(logits, features);
 }
 
-// ---------- Sliding 15-minute window (same logic as Python) ----------
+// ---------- Sliding 15-minute window ----------
 class EmotionWindow {
 public:
     EmotionWindow() : filled_(0), mic_epochs_(0) {
@@ -292,10 +284,7 @@ private:
         count = 0;
         for (uint16_t i = 0; i < EMOTION_WINDOW_EPOCHS; ++i) {
             const double x = buffer_[channel][i];
-            if (emotion_present(x)) {
-                total += x;
-                ++count;
-            }
+            if (emotion_present(x)) { total += x; ++count; }
         }
         const uint16_t divisor = count > 0 ? count : 1;
         mean = total / divisor;
@@ -335,7 +324,7 @@ private:
             if (!usable[c] || (c >= 2 && !voice_ok)) continue;
             const double magnitude = fabs(mean[c]);
             const double divisor = magnitude > kEmotionMeanFloor[c] ? magnitude : kEmotionMeanFloor[c];
-            features_[c * 4] = spread[c];
+            features_[c * 4 + 0] = spread[c];
             features_[c * 4 + 1] = mean[c] - baseline_[c];
             features_[c * 4 + 2] = spread[c] / divisor;
             features_[c * 4 + 3] = peakInterval(c, mean[c], spread[c]);
@@ -350,12 +339,15 @@ private:
             result.status = EMOTION_NO_DATA;
             result.emotion = EMOTION_NONE;
             result.confidence_pct = 0;
-            result.intensity_pct = 0;
+            result.stability = result.intensity = result.burstiness = result.wavelength = 0.0f;
         } else if (mean[1] >= kEmotionActivityGateMg) {
             result.status = EMOTION_HIGH_MOTION;
             result.emotion = EMOTION_NONE;
             result.confidence_pct = 0;
-            result.intensity_pct = 0;
+            result.stability  = (float)features_[0];
+            result.intensity  = (float)features_[1];
+            result.burstiness = (float)features_[2];
+            result.wavelength = (float)features_[3];
         } else {
             result = predict_emotion(features_);
         }
